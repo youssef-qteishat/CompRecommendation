@@ -1,0 +1,43 @@
+# --- Virtual environments ---
+.venv/
+venv/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Tool caches ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# --- Secrets / local config ---
+.env
+.env.*
+
+# --- Data (contents ignored, folders kept via .gitkeep) ---
+data/interim/*
+data/processed/*
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+
+# --- Reports (profiles include real addresses and values) ---
+reports/*
+!reports/.gitkeep
+
+# --- Caches and experiment tracking ---
+cache/
+geocode_cache.*
+mlruns/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+NOTES.md
