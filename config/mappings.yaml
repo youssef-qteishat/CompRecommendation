@@ -1,0 +1,347 @@
+# config/mappings.yaml
+#
+# Built from reports/profile_raw.csv (88 appraisals, 9,820 property records,
+# Alberta / Ontario / Nova Scotia / BC).
+#
+# How rules work:
+# - Text is stripped and lowercased before matching. Patterns are Python regexes,
+#   matched with re.search (anywhere in the string).
+# - For every *_rules list, the FIRST matching pattern wins, so ORDER MATTERS.
+# - A null label means "recognized but not usable" -> stored as missing and NOT
+#   logged as unmapped.
+# - Anything that matches no rule becomes "other" and is logged, so new spellings
+#   show up in the logs. Check reports/value_counts.csv for the full lists.
+#
+# Patterns use single quotes so YAML leaves backslashes alone ('\b' = word boundary).
+
+# Strings treated as missing everywhere. 'none' is deliberately NOT here:
+# basement "None" and cooling "None" are real values.
+null_tokens:
+  ["", "n/a", "na", "n.a.", "null", "nan", "unknown", "otherinput", "-", "--"]
+
+# ---------------------------------------------------------------------------
+# Property structure (what kind of building) and ownership (condo or not) are
+# separate fields. Combining them caused ambiguity: subject "Condominium" says
+# nothing about structure, and "Apartment" vs "Condo Apartment" differ only in wording.
+#
+# Apply structure_rules to:
+#   subjects:   structure_type
+#   comps:      prop_type
+#   properties: property_sub_type + " | " + structure_type
+# ---------------------------------------------------------------------------
+structure_rules:
+  - ["semi|half duplex", semi_detached] # before "detached" and "duplex"
+  - [
+      '\b(duplex|triplex|fourplex|[34][- ]?plex|multiplex|multi-?family)\b',
+      multiplex,
+    ]
+  - ['vacant land|residential land|\blot\b|\blocker\b|parking', excluded] # not a dwelling: drop from candidates
+  - ["mobile|trailer|manufactured", mobile]
+  - ["farm|rural|acreage", rural]
+  - [
+      'apartment|\bapt\b|high[- ]?rise|low[- ]?rise|mid[- ]?rise|bachelor|studio',
+      apartment,
+    ]
+  - ['town|\brow\b|stacked|over-?under|up/?down', townhouse]
+  - ['detached|single family|\bhouse\b|\blink\b', detached] # "Link" homes: detached above grade
+  - ['condominium|^condo$|common element|^residential$|^other\b', null] # ownership only / uninformative: fill from style
+
+# is_condo = True when any of these sources match:
+#   subjects:   structure_type, site_dimensions, lot_size_sf
+#   comps:      prop_type, lot_size
+#   properties: property_sub_type, structure_type
+condo_pattern: 'condo|common element|common property|strata|\bapt\b|apartment'
+
+# When structure is null (e.g. subject "Condominium"), fill it from style:
+condo_structure_from_style:
+  apartment: apartment
+  default: townhouse
+
+# ---------------------------------------------------------------------------
+# Style / storeys.
+# Apply to:
+#   subjects:   style
+#   comps:      stories
+#   properties: levels + " | " + style + " | " + structure_type
+#     (structure_type often carries the style after a comma, e.g. "Detached, 2-Storey")
+# Order notes:
+#   - "1 1/2 Storey" and "2 1/2 Storey" contain "2 Storey", so 1.5 and 2.5 come first.
+#   - "Bungalow Raised" contains "Bungalow", so bi_level comes first.
+#   - "3 Level Split" contains "3 ...", so split_level comes before storey_3_plus.
+# ---------------------------------------------------------------------------
+style_rules:
+  - [
+      'apartment|\bapt\b|high[- ]?rise|low[- ]?rise|mid[- ]?rise|bachelor|studio',
+      apartment,
+    ]
+  - ['bi-?level|split entry|raised|hi-?ranch|\bbi-', bi_level] # "Attached-Up/Down, Bi-" (truncated)
+  # "3 Level" (Calgary) is a 3-level unit, not a split; "4/5 Level" and "Multi Level" are splits.
+  - [
+      'side ?split|back ?split|split[- ]?level|level split|(?<![.\d])[45] level|multi[- ]?level',
+      split_level,
+    ] # lookbehind: "1.5 Level" is not a split
+  - [
+      '1\.5|1 1/2|1 3/4|one and a half|1 and half|1½|bungaloft|cape cod',
+      storey_1_5,
+    ]
+  - ['2\.5|2 1/2|two and a half|2 and half|2½', storey_2_5]
+  - [
+      '3 \(or more\)|3 plus|3\+|\b3[- ]?st|three|\b4[- ]?st|\b3 level|^3(\.0)?\b',
+      storey_3_plus,
+    ]
+  - ['\b2[- ]?st|\btwo\b|2 level|2 strorey|^2(\.0)?\b', storey_2] # "2 strorey" typo; levels "2" / "2.0"
+  - ['bungalow|\bbun\b|\b1[- ]?st|one level|1 level|ranch|\bone\b', storey_1]
+  - ['\b(duplex|triplex|fourplex|[34][- ]?plex|multiplex)\b', multiplex] # structure_type carrying the building type
+  # Building type or exterior material written in the style field: no storey info.
+  - [
+      'town|townhse|side by sid|villa|detached|single family|\bland\b|locker|condo|contemporary|modular|mobile|loft|attached|\bother\b|\bnone\b|brick|vinyl|stone|stucco|wood',
+      null,
+    ]
+
+# ---------------------------------------------------------------------------
+# Basement -> several features. Apply to:
+#   subjects: basement, comps: basement_finish, properties: basement
+# Note: properties.basement is "" in ~31% of rows; treat as missing.
+# ---------------------------------------------------------------------------
+basement:
+  null_values: [
+      "condo common",
+      "common property",
+      "driveway",
+      "other",
+      "see remarks",
+      "included above",
+      "adjusted above in lfa",
+    ] # recognized junk -> missing
+
+  presence_rules: # -> has_basement (0/1)
+    - ['\bnone\b|no basement|\bslab\b', 0]
+    - [
+        'full|part|half|fin|devel|walk|\bwo\b|\brec\b|sep|apartment|suite|basement|bsmt',
+        1,
+      ]
+    - ["crawl|cellar", 0] # after the rule above: "Part/FullFin'd+Crawl" = 1
+
+  finish_rules: # -> basement_finish: 0 none/unfinished, 1 partial, 2 finished
+    - ['\bnone\b|no basement|\bslab\b', 0]
+    - ['unfinish|un-?fin\b|undevelop|unspoiled', 0] # "Full/Unfinish/WO"                             # before "fin"
+    - ['part(ial(ly)?)?\s*/?\s*(fin|dev)', 1] # Part Finished, Partially Finished, Full/Part Finished, Part / Finished
+    - ['fin|devel(?!opment)|\brec\b|wet bar|apartment|suite|\b1f\b', 2] # not "Development Potential"          # Developed/1F, "Devel. WO/1F", "Rec/Bath" = finished
+    - [
+        '\bfull\b|partial|half|sep|exterior|walk|basement|bsmt|remarks|other|development',
+        null,
+      ] # basement exists, finish not stated
+    - ["crawl|cellar", 0] # after the null rule: "Crawl Space, Full" = unknown
+
+  walkout: 'walk-?out|\bw/?o\b'
+  walkup: "walk-?up"
+  separate_entrance: "sep(arate)?|exterior entry"
+  suite: "apartment|suite|in-?law"
+
+# ---------------------------------------------------------------------------
+# Cooling. Apply to subjects.cooling and properties.cooling.
+# properties.cooling contains HEATING values for some rows ("Baseboard",
+# "Forced Air", "Furnace, Forced Air"); those become missing, not "none".
+# ---------------------------------------------------------------------------
+cooling_rules:
+  - ["central", central_air]
+  - ["heat ?pump|ductless|mini[- ]?split|split system", heat_pump] # "Baseboard, Heat Pump" -> heat_pump
+  - ['wall unit|window unit|\bwindow\b|\bwall\b|portable', room_unit]
+  - ['\bnone\b|rough-?in|no a/?c|^no$', none]
+  - ['^(full|partial)\b|sep\.? hvac', ac_unspecified] # AC coverage stated, system not named
+  - [
+      "baseboard|forced air|furnace|hot water|fireplace|radiant|radiator|stove|in ?floor|fan coil|other|energy",
+      null,
+    ]
+
+# Derived: has_ac = 1 for central_air/heat_pump/room_unit/ac_unspecified, 0 for none, missing otherwise.
+
+# ---------------------------------------------------------------------------
+# Heating (primary system). Apply to subjects.heating and properties.heating.
+# ---------------------------------------------------------------------------
+heating_rules:
+  - ["geo-?thermal|ground source", geothermal]
+  - ["heat ?pump", heat_pump] # before forced air: "Heat Pump - Fully Ducted"
+  - ['forced air|\bfha\b|furnace|\bcentral\b|ducted|efficiency', forced_air] # "High/Mid Efficiency" = furnace rating
+  - ['hot water|\bwater\b|\bhwbb\b|boiler|radiator|steam|hydronic', hot_water] # before baseboard: "HOT WATER BASEBOARD"
+  - ["baseboard|baserboard|electric", baseboard] # fuel is a separate field; "baserboard" typo seen
+  - ['radiant|in-?\s?floor|infloor', radiant]
+  - ["fan coil", fan_coil]
+  - ["wood|pellet|stove|fireplace|space heater", stove_fireplace]
+  - ['\bnone\b', none]
+  - ['natural gas|\bgas\b|standard|other|remarks|energy star', null] # fuel or nothing useful, no system
+
+# Heating fuel. Apply to subjects.fuel_type, and to properties.heating
+# (properties embed the fuel: "Forced Air, Natural Gas").
+fuel_rules:
+  - ['natural gas|\bgas\b', natural_gas]
+  - ["propane", propane]
+  - ['\boil\b', oil]
+  - ["geo-?thermal|ground source", geothermal]
+  - ["electric|baseboard|heat ?pump", electric]
+  - ["pellet|wood|coal", solid_fuel]
+  - [
+      'forced air|radiant|in-?\s?floor|fan coil|water|hwbb|boiler|radiator|central|furnace|stove|efficiency|standard|other|none|remarks|heater|fireplace',
+      null,
+    ] # system named, fuel not stated
+
+# ---------------------------------------------------------------------------
+# Condition. Subjects use an absolute scale.
+# comps.condition MIXES absolute values (Good/Average/Excellent) with relative
+# ones (Inferior/Similar/Superior). Comp condition is never a model feature.
+# ---------------------------------------------------------------------------
+condition_scale:
+  poor: 1
+  fair: 2
+  average: 3
+  good: 4
+  excellent: 5
+relative_condition_values: ["inferior", "similar", "superior"]
+
+# ---------------------------------------------------------------------------
+# Area units. Values arrive as "1044 SqFt", "825 sf", "94 SqM", "1.25 Acres",
+# "60' x 110' / 6,600 sf", "3332+/-SqFt". Factors convert to square feet.
+# First matching unit wins; the number directly before the unit is used.
+# No unit found -> assume square feet.
+# ---------------------------------------------------------------------------
+area_units:
+  - ['sq\.?\s*m\b|sqm|\bm2\b|m²|square met', 10.7639]
+  - ['hectare|\bha\b', 107639.0]
+  - ['acre|\bac\b', 43560.0]
+  - ['sq\.?\s*f|sqft|\bsf\b|square f|\bft\b', 1.0]
+
+# ---------------------------------------------------------------------------
+# Year built vs age. subject_age and comps.age mix years ("2016") and ages ("21",
+# "43+/-yrs", "100+"). properties.year_built is mostly real years, with a few
+# small values that look like age codes.
+# ---------------------------------------------------------------------------
+year_age:
+  min_year: 1800 # >= min_year is a year; smaller is an age in years
+  new_tokens: ["new", "new construction", "under construction"] # -> age 0
+  # properties.year_built: 5,625 real years, 169 small values (2, 8, 10, 13, 23, 40, 75).
+  # The small values look like age-range codes, not exact ages. Store them as
+  # age_approx with age_is_approx = True; don't treat them like real years.
+  property_age_codes: [2, 8, 10, 13, 23, 40, 75]
+
+# ---------------------------------------------------------------------------
+# GLA values that are likely range midpoints rather than measurements.
+# Consistent with listing-system size ranges (e.g. 700-1100 -> 900,
+# 1100-1500 -> 1300, 1500-2000 -> 1750) and 100 sq ft condo ranges
+# (500-599 -> 550, ... 900-999 -> 950).
+# Used ONLY to prefer an exact value when deduplicating. Never a model feature.
+# ---------------------------------------------------------------------------
+# Confirmed by profile_answers.md (value x property_sub_type):
+#   houses (Detached / Freehold Townhouse / Semi): 900, 1300, 1750, 2250, 2750, 3250, 4250
+#   condos (Condo Apartment / Condo Townhouse):     250, 550, 650, 750, 850, 950, 1100, 1300, 1500, 1700, 1900
+gla_bucket_values:
+  [
+    250,
+    550,
+    650,
+    750,
+    850,
+    900,
+    950,
+    1100,
+    1300,
+    1500,
+    1700,
+    1750,
+    1900,
+    2250,
+    2750,
+    3250,
+    4250,
+  ]
+gla_bucket_review: [700] # 26 Detached + 8 Apartment; could be a "<700" range or genuine
+
+# ---------------------------------------------------------------------------
+# Addresses. The data spans several provinces, so do not cut addresses at a
+# hard-coded city name. Directionals are NORMALIZED, not dropped: Calgary
+# addresses use quadrants (NW/SW/NE/SE) that distinguish different streets.
+# ---------------------------------------------------------------------------
+address:
+  province_codes: [AB, BC, MB, NB, NL, NS, NT, NU, ON, PE, QC, SK, YT]
+  postal_regex: '\b[a-z]\d[a-z]\s?(\d[a-z]\d)?\b' # full code or FSA only (e.g. "T3N")
+  unit_patterns: # tried in order; first group = unit, second = rest
+    - '^unit\s*([\w-]+)\s*-\s*(.+)$' # "Unit 2 - 250 King St E"
+    - '^unit\s*([\w-]+)\s+(\d+\s.+)$' # "Unit 1012 60 Walter Havill Drive"
+    - '^(\w+)-(\d+\s.+)$' # "701-121 Queen St", "142-950 Oakview Ave"
+    - '^(\d+)\s+(\d+\s+(?!hwy\b|highway\b|rd\b|road\b|line\b|conc)\D.+)$' # "407 105 Dunbrack St", but not "7180 207 HWY"
+  street_suffixes:
+    av: avenue
+    ave: avenue
+    blvd: boulevard
+    cir: circle
+    circ: circle
+    cl: close
+    cres: crescent
+    cr: crescent
+    crt: court
+    ct: court
+    cv: cove
+    dr: drive
+    gdns: gardens
+    gr: grove
+    grv: grove
+    hts: heights
+    hwy: highway
+    ln: lane
+    lndg: landing
+    mnr: manor
+    pk: park
+    pkwy: parkway
+    pl: place
+    plz: plaza
+    pt: point
+    rd: road
+    rdg: ridge
+    rte: route
+    sq: square
+    st: street
+    ter: terrace
+    terr: terrace
+    tr: trail
+    trl: trail
+    vw: view
+    wy: way
+  directionals:
+    north: n
+    south: s
+    east: e
+    west: w
+    northeast: ne
+    northwest: nw
+    southeast: se
+    southwest: sw
+
+# ---------------------------------------------------------------------------
+# Validation ranges (pandera). Covers AB, BC, ON, NS.
+# The earlier Kingston-only bounds would have rejected Calgary and Halifax.
+# ---------------------------------------------------------------------------
+validation:
+  lat_range: [41.5, 60.5]
+  lon_range: [-125.0, -59.0]
+  gla_range_sqft: [150, 10000]
+  price_range: [30000, 10000000]
+  bedrooms_range: [0, 12]
+
+# Columns to drop: entirely missing or not used.
+drop_columns:
+  properties: [bg_fin_area, roof, main_level_finished_area, upper_lvl_fin_area] # 100% / 54% / 72% / 86% missing
+  comps: [neighborhood] # 99% blank
+  subjects: [third_lvl_area] # 99% blank
+
+# ---------------------------------------------------------------------------
+# Candidate filters (stage 10), from the date section of profile_answers.md.
+# ---------------------------------------------------------------------------
+filters:
+  # Selected comps: median 60 days old, p95 185, p99 284, max 325.
+  # 365 keeps every observed comp and matches the usual 12-month comp guideline.
+  lookback_days: 365
+  # 23% of candidates closed AFTER their appraisal's effective date -> drop them.
+  drop_future_candidates: true
+  # 1 selected comp is dated after the effective date (-90 days). Keep it out of
+  # training (a negative days_since_sale would only ever appear on a positive),
+  # but keep it in evaluation as an unreachable positive.
+  future_selected_comp: exclude_from_training
