@@ -2,17 +2,25 @@ import argparse
 import logging
 import time
 
-from src.comps import load, profile, normalize, dedupe, link, tables, validate
+from comps import load, profile, normalize
+# from src.comps import load, profile, normalize, dedupe, link, tables, validate
+
 
 STEPS = [
     ("load", load.run),
     ("profile", profile.run),
     ("normalize", normalize.run),
-    ("dedupe", dedupe.run),
-    ("link", link.run),
-    ("tables", tables.run),
-    ("validate", validate.run),
 ]
+
+# STEPS = [
+#     ("load", load.run),
+#     ("profile", profile.run),
+#     ("normalize", normalize.run),
+#     ("dedupe", dedupe.run),
+#     ("link", link.run),
+#     ("tables", tables.run),
+#     ("validate", validate.run),
+# ]
 NAMES = [name for name, _ in STEPS]
 
 def main():
